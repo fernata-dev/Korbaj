@@ -23,16 +23,17 @@
   const CFG = {
     cordNodes: 26,
     segLen: 11,                 // cord ≈ 286 px
-    handleLen: 64,
+    handleLen: 52,
     gravity: 1800,              // px/s²
     airDrag: 0.00055,           // quadratic drag coefficient (1/px)
     linDamp: 0.9996,            // tiny internal friction per substep
-    handleInvMass: 0.04,        // how much the cord can drag the handle (lower = heavier handle)
+    handleInvMass: 0.04,        // grip firmness vs the cord's pull during the solve (lower = firmer)
+    gripCoupling: 0.22,         // how much of the cord's pull turns into handle rotation (wrist resists the rest)
     wristFreq: 15,              // rad/s — natural frequency of the wrist (higher = stiffer)
-    wristDamping: 0.38,         // damping ratio (<1 = slight overshoot / follow-through)
-    leadSpeed: 650,             // px/s — at this hand speed the handle points halfway toward the motion
-    handleInertia: 0.7,         // how strongly hand acceleration swings the handle
-    handleGravity: 0.35,        // how much gravity sags the handle against the wrist
+    wristDamping: 0.32,         // damping ratio (<1 = slight overshoot / follow-through)
+    leadSpeed: 450,             // px/s — at this hand speed the handle points halfway toward the motion
+    handleInertia: 1.0,         // how strongly hand acceleration swings the handle
+    handleGravity: 0.25,        // how much gravity sags the handle against the wrist
     tipMassRatio: 40,           // tip is 40× lighter than the cord root (exponential taper)
     iterations: 16,
     substep: 1 / 240,
@@ -50,7 +51,7 @@
     lashLife: 3.0,
     tauntChance: 0.3,
     dualOffset: 26,
-    clickFlick: 0.2,            // s — duration of the scripted wrist flick on click
+    clickFlick: 0.16,           // s — duration of the scripted wrist flick on click
   };
 
   const TAUNTS = [
@@ -247,7 +248,7 @@
       let d = nth - this.th;
       d = Math.atan2(Math.sin(d), Math.cos(d));
       this.th += d;
-      this.om += d / CFG.substep * 0.5;
+      this.om += (d / CFG.substep) * CFG.gripCoupling;
       this.x[1] = gx + Math.cos(this.th) * L;
       this.y[1] = gy + Math.sin(this.th) * L;
     }
@@ -322,6 +323,16 @@
       const vx = this.x[t] - this.px[t], vy = this.y[t] - this.py[t];
       const pts = [];
       for (let i = Math.max(2, this.n - 8); i < this.n; i++) pts.push([this.x[i], this.y[i]]);
+      // Recoil: the shock wave carries energy away and the cracker snaps back.
+      // Last few nodes lose most of their velocity and rebound, strongest at the tip.
+      for (let j = 0; j < 6; j++) {
+        const i = this.n - 1 - j;
+        const rebound = -0.35 * (1 - j / 6) + 0.25 * (j / 6);
+        const vx0 = this.x[i] - this.px[i], vy0 = this.y[i] - this.py[i];
+        this.px[i] = this.x[i] - vx0 * rebound;
+        this.py[i] = this.y[i] - vy0 * rebound;
+      }
+      shake = Math.max(shake, 2 + intensity * 3);
       onCrack(tx, ty, vx, vy, intensity, pts, this.pan + (tx / W - 0.5));
     }
   }
@@ -333,6 +344,7 @@
   const texts = [];
   const lashes = [];
   const combo = { count: 0, last: -10 };
+  let shake = 0; // impact jolt (px), decays fast
   let lastTauntAt = -10;
 
   function onCrack(x, y, vx, vy, intensity, pts, pan) {
@@ -460,8 +472,10 @@
     if (state.mode === 3) { pat.reversals.push(clock, clock, clock); return; }
     // Scripted wrist flick: the hand itself moves; physics produces the crack.
     const a = whips.length ? whips[0].handleAngle() : Math.PI / 2;
-    flick.dx = -Math.cos(a) * 70; flick.dy = -Math.sin(a) * 70 - 20;
+    flick.dx = -Math.cos(a) * 40; flick.dy = -Math.sin(a) * 40 - 12;
     flick.t = 0;
+    // Wrist snap: an angular impulse on the handle, like snapping your wrist
+    whips.forEach((w) => { w.om += (Math.cos(w.th) >= 0 ? -1 : 1) * 38; });
     whips.forEach((w) => { w.forceCrackAt = clock + CFG.clickFlick + 0.06; });
   });
   window.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -714,19 +728,19 @@
     // shadow
     ctx.fillStyle = 'rgba(0,0,0,0.25)';
     ctx.beginPath();
-    ctx.ellipse(L / 2 + 4, 6, L / 2 + 6, 6.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(L / 2 + 4, 5, L / 2 + 4, 5, 0, 0, Math.PI * 2);
     ctx.fill();
 
     // golden lacquered wood, slightly flared toward the grip
     const body = () => {
       ctx.beginPath();
-      ctx.moveTo(2, -6.8);
-      ctx.bezierCurveTo(L * 0.4, -6, L * 0.75, -4.8, L - 2, -4.2);
-      ctx.quadraticCurveTo(L + 2, 0, L - 2, 4.2);
-      ctx.bezierCurveTo(L * 0.75, 4.8, L * 0.4, 6, 2, 6.8);
+      ctx.moveTo(2, -5);
+      ctx.bezierCurveTo(L * 0.4, -4.4, L * 0.75, -3.6, L - 2, -3.1);
+      ctx.quadraticCurveTo(L + 1.5, 0, L - 2, 3.1);
+      ctx.bezierCurveTo(L * 0.75, 3.6, L * 0.4, 4.4, 2, 5);
       ctx.closePath();
     };
-    const wood = ctx.createLinearGradient(0, -7, 0, 7);
+    const wood = ctx.createLinearGradient(0, -5, 0, 5);
     wood.addColorStop(0, '#fff2b0');
     wood.addColorStop(0.3, '#f2c33c');
     wood.addColorStop(0.75, '#b97a12');
@@ -744,27 +758,27 @@
     ctx.strokeStyle = 'rgba(90,50,5,0.55)';
     ctx.lineWidth = 1.2;
     for (let s = 12; s < L * 0.72; s += 5) {
-      ctx.beginPath(); ctx.moveTo(s, -8); ctx.lineTo(s + 5, 8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(s, -6); ctx.lineTo(s + 4, 6); ctx.stroke();
     }
     ctx.restore();
 
     // dark ferrule where the cord leaves
     ctx.fillStyle = '#3a2408';
-    ctx.fillRect(L - 8, -4.6, 5, 9.2);
+    ctx.fillRect(L - 7, -3.4, 4, 6.8);
     ctx.fillStyle = 'rgba(255,230,160,0.5)';
-    ctx.fillRect(L - 8, -4.6, 5, 1.6);
+    ctx.fillRect(L - 7, -3.4, 4, 1.3);
 
     // pommel at the cursor
-    const knob = ctx.createRadialGradient(-2, -3, 1, 0, 0, 9);
+    const knob = ctx.createRadialGradient(-1.5, -2.2, 0.8, 0, 0, 7);
     knob.addColorStop(0, '#fff6cf'); knob.addColorStop(0.5, '#d9a52a'); knob.addColorStop(1, '#5a3605');
     ctx.fillStyle = knob;
-    ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, 6.2, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = 'rgba(40,22,2,0.9)'; ctx.lineWidth = 1.2; ctx.stroke();
 
     // specular
     ctx.strokeStyle = 'rgba(255,255,240,0.7)';
     ctx.lineWidth = 1.3;
-    ctx.beginPath(); ctx.moveTo(10, -4.4); ctx.lineTo(L * 0.8, -3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(8, -3.2); ctx.lineTo(L * 0.8, -2.2); ctx.stroke();
     ctx.restore();
   }
 
@@ -870,7 +884,12 @@
     }
     updateFX(dt);
 
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     ctx.clearRect(0, 0, W, H);
+    if (shake > 0.05) {
+      ctx.translate(rand(-shake, shake), rand(-shake, shake));
+      shake *= Math.exp(-dt / 0.05);
+    }
     drawLashes();
     for (const w of whips) drawCord(w);
     for (const w of whips) drawHandle(w);
