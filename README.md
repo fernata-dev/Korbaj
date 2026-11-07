@@ -8,7 +8,7 @@
 Flick your mouse → *TESHH!* 💥 — your slow AI gets the message.
 Or pat it gently when it ships clean code. ✋
 
-![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-45-47848F?logo=electron&logoColor=white)
 ![Canvas](https://img.shields.io/badge/HTML5-Canvas-E34F26?logo=html5&logoColor=white)
 ![Web Audio](https://img.shields.io/badge/Web%20Audio-procedural-ff6a3d)
 ![Platforms](https://img.shields.io/badge/Linux%20%7C%20Windows%20%7C%20macOS-supported-2ea44f)
@@ -57,6 +57,11 @@ npm start
 ```
 
 Something off?
+
+```bash
+npm run fix-electron  # "Electron failed to install correctly" → re-download the binary
+```
+
 
 ```bash
 npm run start:nogpu   # black background / GPU glitches

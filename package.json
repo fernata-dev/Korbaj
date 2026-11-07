@@ -9,9 +9,14 @@
     "start": "electron .",
     "start:nogpu": "electron . --disable-gpu",
     "start:x11": "electron . --ozone-platform=x11",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check sound.js"
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check sound.js",
+    "postinstall": "node scripts/ensure-electron.js",
+    "fix-electron": "node scripts/ensure-electron.js --force"
   },
   "devDependencies": {
-    "electron": "^33.2.0"
+    "electron": "^45.2.3"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
