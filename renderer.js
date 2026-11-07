@@ -1,29 +1,50 @@
 'use strict';
 /**
- * Korbaj renderer — Verlet whip physics, VFX and interaction.
- * Coordinates are CSS pixels; the canvas backing store is scaled by devicePixelRatio.
+ * Korbaj renderer — rigid-handle + Verlet cord whip physics, VFX and interaction.
+ *
+ * Physics model (all in CSS px and seconds, fixed 240 Hz substeps):
+ *   node 0      grip — kinematic, follows the (interpolated) cursor
+ *   node 1      end of the handle — heavy rigid stick hinged at the grip, with a soft
+ *               "wrist" spring toward a rest angle. It swings and rotates naturally.
+ *   node 2..N   cord — point masses joined by inextensible distance constraints,
+ *               lighter toward the tip (tapered mass), gravity + quadratic air drag.
+ *
+ * Crack = the real-world signature, not just "tip is fast":
+ *   tip speed (smoothed) above a sound-barrier threshold scaled to the screen
+ *   AND the hand itself moved fast/deliberately (intentSpeed) — small moves never crack
+ *   AND tip at least 2× faster than the hand (energy concentrated in the tip)
+ *   AND cord almost fully extended (the loop has unrolled to the end)
+ *   AND the detector has re-armed since the last crack (hysteresis).
  */
 (() => {
   // ======================= Config =======================
   const CFG = {
-    nodes: 28,
-    segLen: 10.5,               // px between nodes (cord length ≈ 285px)
-    handleLen: 62,
-    gravity: 1500,              // px/s²
-    damping: 0.992,             // per substep velocity retention (air resistance)
-    iterations: 16,             // constraint solver passes
-    bendStiffness: 0.08,        // weak i↔i+2 constraint: lets the loop travel down the cord
-    substep: 1 / 120,
-    maxSubsteps: 6,
-    crackSpeed: 3400,           // px/s tip speed that counts as breaking the "sound barrier"
-    crackCooldown: 0.16,        // s
-    clickCrackDelay: 0.11,      // s — forced crack if a click-snap didn't crack naturally
-    maxTipSpeed: 11000,         // px/s clamp to keep the sim stable
-    comboWindow: 2.0,           // s
+    cordNodes: 26,
+    segLen: 11,                 // cord ≈ 286 px
+    handleLen: 64,
+    gravity: 1800,              // px/s²
+    airDrag: 0.00055,           // quadratic drag coefficient (1/px)
+    linDamp: 0.9996,            // tiny internal friction per substep
+    handleInvMass: 0.12,        // handle is ~8× heavier than a cord node
+    tipMassRatio: 40,           // tip is 40× lighter than the cord root (exponential taper)
+    wrist: 0.012,               // wrist spring stiffness toward rest angle (per substep) — low = handle swings freely
+    iterations: 16,
+    substep: 1 / 240,
+    maxSubsteps: 12,
+    renderDelay: 0.014,         // s — sample cursor slightly in the past for smooth interpolation
+    crackSpeedFactor: 3.0,      // threshold = factor × screen height per second (≈3240 px/s @1080p)
+    crackRatio: 2.0,            // tip speed / hand speed
+    intentSpeed: 2300,          // hand must have moved at least this fast (px/s) in the last ~0.25 s
+    crackExtension: 0.86,       // fraction of full cord length
+    rearmFactor: 0.45,          // must drop below threshold×this before the next crack
+    crackCooldown: 0.22,
+    maxTipSpeed: 14000,
+    comboWindow: 2.0,
     fireAt: 5,
-    lashLife: 3.0,              // s
-    tauntChance: 0.4,
-    dualOffset: 30,
+    lashLife: 3.0,
+    tauntChance: 0.3,
+    dualOffset: 26,
+    clickFlick: 0.2,            // s — duration of the scripted wrist flick on click
   };
 
   const TAUNTS = [
@@ -59,28 +80,23 @@
   }
   window.addEventListener('resize', resize);
   resize();
+  const crackThreshold = () => Math.max(3200, CFG.crackSpeedFactor * Math.max(H, 600));
 
   const sound = new window.KorbajSound();
   sound.init().catch((e) => console.warn('[korbaj] audio init failed', e));
 
   const state = { visible: true, passive: true, mode: 1 };
-  const cursor = { x: W / 2, y: H / 3, has: false };
-  const anchor = { x: W / 2, y: H / 3, vx: 0, vy: 0 };
   let clock = 0;
+  const stats = { cracks: 0, maxTip: 0 };
+  window.__korbajStats = stats; // handy for tuning from DevTools
+  window.__korbajCfg = CFG;
 
   // ======================= Utils =======================
   const rand = (a, b) => a + Math.random() * (b - a);
   const pick = (arr) => arr[(Math.random() * arr.length) | 0];
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
   const lerp = (a, b, t) => a + (b - a) * t;
-  function angLerp(a, b, t) {
-    let d = b - a;
-    while (d > Math.PI) d -= Math.PI * 2;
-    while (d < -Math.PI) d += Math.PI * 2;
-    return a + d * t;
-  }
 
-  // Pre-rendered glow sprites (much cheaper than shadowBlur per particle)
   function makeGlow(r, stops) {
     const c = document.createElement('canvas');
     c.width = c.height = r * 2;
@@ -92,208 +108,237 @@
     return c;
   }
   const SPR = {
-    flash: makeGlow(128, [[0, 'rgba(255,255,255,1)'], [0.15, 'rgba(255,250,210,0.9)'], [0.45, 'rgba(255,190,80,0.35)'], [1, 'rgba(255,120,0,0)']]),
+    flash: makeGlow(128, [[0, 'rgba(255,255,255,1)'], [0.15, 'rgba(255,250,215,0.9)'], [0.45, 'rgba(255,200,100,0.3)'], [1, 'rgba(255,120,0,0)']]),
     fire: makeGlow(32, [[0, 'rgba(255,250,220,1)'], [0.25, 'rgba(255,190,60,0.9)'], [0.6, 'rgba(255,80,0,0.45)'], [1, 'rgba(180,20,0,0)']]),
-    spark: makeGlow(16, [[0, 'rgba(255,255,240,1)'], [0.4, 'rgba(255,210,120,0.7)'], [1, 'rgba(255,120,0,0)']]),
+    spark: makeGlow(16, [[0, 'rgba(255,255,240,1)'], [0.4, 'rgba(255,215,130,0.7)'], [1, 'rgba(255,120,0,0)']]),
     heal: makeGlow(32, [[0, 'rgba(230,255,250,1)'], [0.3, 'rgba(80,255,200,0.7)'], [1, 'rgba(0,200,255,0)']]),
   };
 
+  // ======================= Cursor sampling =======================
+  // Samples are timestamped on arrival and replayed slightly in the past, so every
+  // substep gets a smoothly interpolated hand position. Without this, polling jitter
+  // turns into velocity spikes — which used to fake whip cracks.
+  const samples = [];
+  const cursor = { x: W / 2, y: H / 3, has: false };
+  function pushSample(x, y) {
+    const t = performance.now() / 1000;
+    cursor.x = x; cursor.y = y;
+    if (!cursor.has) {
+      cursor.has = true;
+      samples.length = 0;
+      samples.push({ x, y, t: t - 1 });
+      hand.x = x; hand.y = y;
+      whips.forEach((w) => w.reset());
+    }
+    samples.push({ x, y, t });
+    while (samples.length > 64) samples.shift();
+  }
+  function sampleAt(t) {
+    if (!samples.length) return [cursor.x, cursor.y];
+    if (t <= samples[0].t) return [samples[0].x, samples[0].y];
+    for (let i = samples.length - 1; i > 0; i--) {
+      const a = samples[i - 1], b = samples[i];
+      if (t >= a.t) {
+        if (t >= b.t) return [b.x, b.y];
+        const k = (t - a.t) / (b.t - a.t || 1);
+        return [lerp(a.x, b.x, k), lerp(a.y, b.y, k)];
+      }
+    }
+    return [samples[0].x, samples[0].y];
+  }
+
+  // The "hand" = interpolated cursor + scripted flick offset (click in Active mode)
+  const hand = { x: W / 2, y: H / 3, vx: 0, vy: 0, speed: 0, peak: 0 };
+  const flick = { t: -1, dx: 0, dy: 0 };
+  function flickOffset() {
+    if (flick.t < 0) return [0, 0];
+    const k = flick.t / CFG.clickFlick;
+    if (k >= 1) { flick.t = -1; return [0, 0]; }
+    // back-swing then a sharp forward snap: -sin for first 40%, strong + for the rest
+    const s = k < 0.4 ? -Math.sin((k / 0.4) * Math.PI) * 0.45 : Math.sin(((k - 0.4) / 0.6) * Math.PI);
+    return [flick.dx * s, flick.dy * s];
+  }
+
   // ======================= Whip =======================
   class Whip {
-    constructor(offsetX, baseAngle, pan) {
+    constructor(offsetX, restAngle, pan) {
       this.offsetX = offsetX;
-      this.baseAngle = baseAngle;     // resting handle angle (radians, 0 = right, +π/2 = down)
-      this.angle = baseAngle;
+      this.restAngle = restAngle; // radians, 0 = pointing down; + = toward the right
       this.pan = pan;
-      this.n = CFG.nodes;
-      this.x = new Float32Array(this.n); this.y = new Float32Array(this.n);
-      this.px = new Float32Array(this.n); this.py = new Float32Array(this.n);
-      this.w = new Float32Array(this.n); // inverse mass
-      for (let i = 0; i < this.n; i++) {
-        // Tip is lighter than the base: a tapered mass profile is what makes a real whip
-        // accelerate its loop toward the tip — conservation of momentum on shrinking mass.
-        this.w[i] = i === 0 ? 0 : 1 + (i / this.n) * 5;
+      this.n = 2 + CFG.cordNodes;
+      const n = this.n;
+      this.x = new Float64Array(n); this.y = new Float64Array(n);
+      this.px = new Float64Array(n); this.py = new Float64Array(n);
+      this.w = new Float64Array(n);
+      this.len = new Float64Array(n); // rest length from node i-1 to i
+      this.w[0] = 0;
+      this.w[1] = CFG.handleInvMass;
+      this.len[1] = CFG.handleLen;
+      for (let i = 2; i < n; i++) {
+        const k = (i - 2) / (n - 3);
+        // Exponential taper: mass falls off geometrically toward the tip, like braided leather
+        this.w[i] = Math.pow(CFG.tipMassRatio, k);
+        this.len[i] = CFG.segLen;
       }
+      this.cordLen = CFG.segLen * (n - 2);
+      this.tipEma = 0;
+      this.armed = true;
       this.cooldown = 0;
-      this.pendingCrack = -1;
-      this.tipSpeed = 0;
-      this.hx = 0; this.hy = 0; // handle tip (= cord root)
-      this.reset(anchor.x, anchor.y);
+      this.forceCrackAt = -1;
+      this.reset();
     }
 
-    reset(ax, ay) {
-      const gx = ax + this.offsetX, gy = ay;
-      this.hx = gx + Math.cos(this.angle) * CFG.handleLen;
-      this.hy = gy + Math.sin(this.angle) * CFG.handleLen;
+    gripPos() { return [hand.x + this.offsetX, hand.y]; }
+
+    reset() {
+      const [gx, gy] = this.gripPos();
+      const sx = Math.sin(this.restAngle), sy = Math.cos(this.restAngle);
+      let x = gx, y = gy;
       for (let i = 0; i < this.n; i++) {
-        this.x[i] = this.px[i] = this.hx;
-        this.y[i] = this.py[i] = this.hy + i * CFG.segLen;
+        if (i > 0) {
+          // handle points along rest angle, cord hangs straight down
+          if (i === 1) { x += sx * this.len[1]; y += sy * this.len[1]; } else { y += this.len[i]; }
+        }
+        this.x[i] = this.px[i] = x; this.y[i] = this.py[i] = y;
       }
+      this.tipEma = 0;
     }
 
-    grip(ax, ay) { return [ax + this.offsetX, ay]; }
+    handleAngle() { return Math.atan2(this.y[1] - this.y[0], this.x[1] - this.x[0]); }
 
-    step(dt, ax, ay, avx, avy) {
-      const { n, x, y, px, py, w } = this;
-      // --- Handle orientation: tilts with movement, springs back to rest ---
-      const sway = clamp(avx * 0.00055, -1.1, 1.1) + clamp(avy * 0.00025, -0.4, 0.4);
-      const target = this.baseAngle - sway;
-      this.angle = angLerp(this.angle, target, 1 - Math.exp(-dt * 14));
-      const [gx, gy] = this.grip(ax, ay);
-      this.hx = gx + Math.cos(this.angle) * CFG.handleLen;
-      this.hy = gy + Math.sin(this.angle) * CFG.handleLen;
-
-      // --- Verlet integrate ---
+    step(dt) {
+      const { n, x, y, px, py, w, len } = this;
+      const [gx, gy] = this.gripPos();
       const g = CFG.gravity * dt * dt;
       const maxStep = CFG.maxTipSpeed * dt;
+
+      // --- Integrate (Verlet) with quadratic air drag: a = -c|v|v (lighter nodes feel it more) ---
       for (let i = 1; i < n; i++) {
-        let vx = (x[i] - px[i]) * CFG.damping;
-        let vy = (y[i] - py[i]) * CFG.damping;
+        let vx = x[i] - px[i], vy = y[i] - py[i];
         const sp = Math.hypot(vx, vy);
         if (sp > maxStep) { vx *= maxStep / sp; vy *= maxStep / sp; }
+        const drag = Math.max(0.5, 1 - CFG.airDrag * (sp / dt) * dt * (i === 1 ? 0.2 : Math.min(3, Math.sqrt(w[i])) * 0.6));
+        const f = drag * CFG.linDamp;
         px[i] = x[i]; py[i] = y[i];
-        x[i] += vx; y[i] += vy + g;
+        x[i] += vx * f;
+        y[i] += vy * f + g;
       }
       px[0] = x[0]; py[0] = y[0];
-      x[0] = this.hx; y[0] = this.hy;
+      x[0] = gx; y[0] = gy;
 
-      // --- Constraints ---
-      const L = CFG.segLen;
-      for (let k = 0; k < CFG.iterations; k++) {
-        x[0] = this.hx; y[0] = this.hy;
-        for (let i = 0; i < n - 1; i++) {
-          const j = i + 1;
-          const dx = x[j] - x[i], dy = y[j] - y[i];
-          const d = Math.hypot(dx, dy) || 1e-6;
-          const wsum = w[i] + w[j];
-          if (wsum === 0) continue;
-          const diff = (d - L) / (d * wsum);
-          x[i] += dx * diff * w[i]; y[i] += dy * diff * w[i];
-          x[j] -= dx * diff * w[j]; y[j] -= dy * diff * w[j];
-        }
-        // Weak bending (skip-one) constraint, only near the handle where the cord is thick
-        for (let i = 0; i < n - 2; i++) {
-          const j = i + 2;
-          const stiff = CFG.bendStiffness * (1 - i / n);
-          const dx = x[j] - x[i], dy = y[j] - y[i];
-          const d = Math.hypot(dx, dy) || 1e-6;
-          if (d >= 2 * L) continue;
-          const wsum = w[i] + w[j];
-          const diff = ((d - 2 * L) / (d * wsum)) * stiff;
-          x[i] += dx * diff * w[i]; y[i] += dy * diff * w[i];
-          x[j] -= dx * diff * w[j]; y[j] -= dy * diff * w[j];
+      // --- Wrist: soft spring pulling the handle toward its rest angle ---
+      const tx = gx + Math.sin(this.restAngle) * len[1];
+      const ty = gy + Math.cos(this.restAngle) * len[1];
+      x[1] += (tx - x[1]) * CFG.wrist;
+      y[1] += (ty - y[1]) * CFG.wrist;
+
+      // --- Constraints (Gauss-Seidel, root → tip) ---
+      for (let it = 0; it < CFG.iterations; it++) {
+        for (let i = 1; i < n; i++) {
+          const a = i - 1;
+          const dx = x[i] - x[a], dy = y[i] - y[a];
+          const d = Math.hypot(dx, dy) || 1e-9;
+          const ws = w[a] + w[i];
+          const c = (d - len[i]) / (d * ws);
+          x[a] += dx * c * w[a]; y[a] += dy * c * w[a];
+          x[i] -= dx * c * w[i]; y[i] -= dy * c * w[i];
         }
       }
 
-      // Keep the cord on-screen-ish (soft floor at the bottom edge)
-      for (let i = 1; i < n; i++) {
-        if (y[i] > H - 2) { y[i] = H - 2; px[i] = lerp(px[i], x[i], 0.3); }
-      }
-
-      // --- Tip speed / crack detection ---
+      // --- Crack detection ---
       const t = n - 1;
-      this.tipSpeed = Math.hypot(x[t] - px[t], y[t] - py[t]) / dt;
+      const tipV = Math.hypot(x[t] - px[t], y[t] - py[t]) / dt;
+      this.tipEma = this.tipEma * 0.55 + tipV * 0.45;
+      if (this.tipEma > stats.maxTip) stats.maxTip = this.tipEma;
       this.cooldown -= dt;
-      if (this.pendingCrack >= 0) this.pendingCrack -= dt;
 
-      if (this.cooldown <= 0 && this.tipSpeed > CFG.crackSpeed) {
-        this.crack(clamp((this.tipSpeed - CFG.crackSpeed) / 5000, 0, 1));
-      } else if (this.pendingCrack >= 0 && this.pendingCrack <= 0 && this.cooldown <= 0) {
-        this.crack(0.85);
-      }
-    }
+      const thr = crackThreshold();
+      if (!this.armed && this.tipEma < thr * CFG.rearmFactor) this.armed = true;
+      const ext = Math.hypot(x[t] - x[1], y[t] - y[1]) / this.cordLen;
+      const ratio = this.tipEma / Math.max(hand.peak, 250);
 
-    /** Click snap: inject a travelling wave of velocity, biggest at the tip. */
-    snap() {
-      const { n, x, y, px, py } = this;
-      const dirX = Math.cos(this.angle), dirY = Math.sin(this.angle);
-      // Perpendicular flip direction so the cord loops over and cracks at full extension
-      const side = Math.random() < 0.5 ? 1 : -1;
-      const nx = -dirY * side, ny = dirX * side;
-      for (let i = 1; i < n; i++) {
-        const f = Math.pow(i / n, 1.6);
-        const kick = 2600 * f * CFG.substep;
-        px[i] = x[i] - (dirX * 0.75 + nx * 0.55) * kick;
-        py[i] = y[i] - (dirY * 0.75 + ny * 0.55) * kick;
+      if (this.armed && this.cooldown <= 0 && this.tipEma > thr &&
+          ratio > CFG.crackRatio && ext > CFG.crackExtension && hand.peak > CFG.intentSpeed) {
+        this.crack(clamp((this.tipEma - thr) / thr, 0, 1));
+      } else if (this.forceCrackAt >= 0 && clock >= this.forceCrackAt) {
+        // Click flick that didn't quite break the barrier: crack at the end of the snap.
+        this.forceCrackAt = -1;
+        if (this.cooldown <= 0) this.crack(0.6);
       }
-      this.pendingCrack = CFG.clickCrackDelay;
     }
 
     crack(intensity) {
       this.cooldown = CFG.crackCooldown;
-      this.pendingCrack = -1;
+      this.armed = false;
+      this.forceCrackAt = -1;
+      stats.cracks++;
       const t = this.n - 1;
       const tx = this.x[t], ty = this.y[t];
       const vx = this.x[t] - this.px[t], vy = this.y[t] - this.py[t];
-      // Lash mark follows the last few cord nodes — the arc the cracker just traced
       const pts = [];
-      for (let i = Math.max(0, this.n - 9); i < this.n; i++) pts.push([this.x[i], this.y[i]]);
+      for (let i = Math.max(2, this.n - 8); i < this.n; i++) pts.push([this.x[i], this.y[i]]);
       onCrack(tx, ty, vx, vy, intensity, pts, this.pan + (tx / W - 0.5));
     }
-
-    tip() { return [this.x[this.n - 1], this.y[this.n - 1]]; }
   }
 
   // ======================= FX systems =======================
-  const particles = []; // sparks / fire / heal motes
+  const particles = [];
   const rings = [];
   const flashes = [];
   const texts = [];
   const lashes = [];
+  const combo = { count: 0, last: -10 };
+  let lastTauntAt = -10;
 
   function onCrack(x, y, vx, vy, intensity, pts, pan) {
-    // Combo
     if (clock - combo.last <= CFG.comboWindow) combo.count++;
     else combo.count = 1;
     combo.last = clock;
     updateComboUI();
 
     const fire = combo.count >= CFG.fireAt;
-    sound.crack(intensity, clamp(pan, -1, 1));
+    sound.crack(0.5 + intensity * 0.5, clamp(pan, -1, 1));
 
-    flashes.push({ x, y, life: 0, max: 0.14, size: 110 + intensity * 90 + (fire ? 60 : 0) });
-    rings.push({ x, y, life: 0, max: 0.38, r0: 6, r1: 90 + intensity * 70, w: 3.5, fire });
-    rings.push({ x, y, life: -0.03, max: 0.5, r0: 4, r1: 150 + intensity * 90, w: 1.5, fire });
+    flashes.push({ x, y, life: 0, max: 0.12, size: 80 + intensity * 70 + (fire ? 50 : 0) });
+    rings.push({ x, y, life: 0, max: 0.32, r0: 4, r1: 60 + intensity * 60, w: 3, fire });
+    rings.push({ x, y, life: -0.03, max: 0.45, r0: 3, r1: 110 + intensity * 80, w: 1.3, fire });
 
-    const count = 26 + ((intensity * 24) | 0) + (fire ? 20 : 0);
+    const count = 16 + ((intensity * 18) | 0) + (fire ? 16 : 0);
     const sp = Math.hypot(vx, vy) || 1;
-    const dx = vx / sp, dy = vy / sp;
+    const base = Math.atan2(vy / sp, vx / sp);
     for (let i = 0; i < count; i++) {
-      const a = Math.atan2(dy, dx) + rand(-1.4, 1.4) + (Math.random() < 0.3 ? Math.PI : 0);
-      const s = rand(250, 900) * (0.6 + intensity * 0.6);
+      const a = base + rand(-1.2, 1.2) + (Math.random() < 0.25 ? Math.PI : 0);
+      const s = rand(220, 760) * (0.6 + intensity * 0.6);
       particles.push({
         kind: 'spark', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
-        life: 0, max: rand(0.25, 0.65), size: rand(1, 2.4), drag: 3.2, g: 900, fire,
+        life: 0, max: rand(0.2, 0.55), size: rand(1, 2.2), drag: 3.4, g: 1000, fire,
       });
     }
 
-    lashes.push({ pts, life: 0, max: CFG.lashLife, fire, w: 2.5 + intensity * 2 });
-    if (lashes.length > 40) lashes.shift();
+    lashes.push({ pts, life: 0, max: CFG.lashLife, fire, w: 2 + intensity * 2 });
+    if (lashes.length > 24) lashes.shift();
 
-    if (Math.random() < CFG.tauntChance && clock - lastTauntAt > 0.6) {
+    if (Math.random() < CFG.tauntChance && clock - lastTauntAt > 0.9) {
       lastTauntAt = clock;
       spawnText(pick(TAUNTS), x, y - 18, fire ? '#ffd27a' : '#ffffff', fire ? '#ff3c00' : '#ff5a36', 1);
     }
   }
-  let lastTauntAt = -10;
 
   function spawnText(str, x, y, fill, glow, kind) {
-    // Stack instead of overlapping: nudge up while a fresh text sits in the same spot
     for (let guard = 0; guard < 6; guard++) {
       const hit = texts.some((o) => o.life < o.max * 0.7 && Math.abs(o.x - x) < 170 && Math.abs(o.y - y) < 30);
       if (!hit) break;
       y -= 32;
     }
     texts.push({
-      str, x: clamp(x, 80, W - 80), y: clamp(y, 40, H - 20),
+      str, x, y: clamp(y, 40, H - 20),
       vy: kind === 3 ? -40 : -55, vx: rand(-15, 15),
       life: 0, max: kind === 3 ? 2.2 : 1.6, fill, glow, kind,
-      rot: rand(-0.08, 0.08), size: kind === 3 ? 22 : 24,
+      rot: rand(-0.06, 0.06), size: kind === 3 ? 22 : 24,
     });
-    if (texts.length > 24) texts.shift();
+    if (texts.length > 16) texts.shift();
   }
 
-  const combo = { count: 0, last: -10 };
   function updateComboUI() {
     if (combo.count >= 2) {
       comboEl.textContent = combo.count >= CFG.fireAt ? `🔥 FIRE WHIP ×${combo.count}` : `COMBO ×${combo.count}`;
@@ -307,22 +352,21 @@
 
   // ======================= Pat mode =======================
   const pat = { lastSign: 0, reversals: [], lastMsg: -10, lastGentle: -10, wobble: 0 };
-  function updatePat(dt, vx, vy) {
-    const speed = Math.hypot(vx, vy);
+  function updatePat(dt) {
+    const vx = hand.vx, speed = hand.speed;
     pat.wobble = lerp(pat.wobble, clamp(vx * 0.0006, -0.5, 0.5), 1 - Math.exp(-dt * 12));
     if (speed > 3800 && clock - pat.lastGentle > 1.5) {
       pat.lastGentle = clock;
-      spawnText(pick(GENTLE), cursor.x, cursor.y - 40, '#ffe2a8', '#ff9a3c', 3);
+      spawnText(pick(GENTLE), hand.x, hand.y - 40, '#ffe2a8', '#ff9a3c', 3);
       return;
     }
     if (Math.abs(vx) > 60 && speed < 3000) {
       const s = Math.sign(vx);
       if (pat.lastSign !== 0 && s !== pat.lastSign) {
         pat.reversals.push(clock);
-        // tiny sparkle per rub
         for (let i = 0; i < 3; i++) {
           particles.push({
-            kind: 'heal', x: cursor.x + rand(-20, 20), y: cursor.y + rand(-10, 20),
+            kind: 'heal', x: hand.x + rand(-20, 20), y: hand.y + rand(-10, 20),
             vx: rand(-30, 30), vy: rand(-90, -30), life: 0, max: rand(0.6, 1.1), size: rand(6, 11), drag: 1, g: -40,
           });
         }
@@ -334,12 +378,12 @@
       pat.lastMsg = clock;
       pat.reversals.length = 0;
       const col = Math.random() < 0.5 ? ['#8dffd6', '#00e0a0'] : ['#a8f0ff', '#00c8ff'];
-      spawnText(pick(PRAISE), cursor.x + rand(-60, 60), cursor.y - 50, col[0], col[1], 3);
+      spawnText(pick(PRAISE), hand.x + rand(-60, 60), hand.y - 50, col[0], col[1], 3);
       sound.chime();
       for (let i = 0; i < 14; i++) {
         const a = rand(0, Math.PI * 2), s = rand(40, 160);
         particles.push({
-          kind: 'heal', x: cursor.x, y: cursor.y - 10, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60,
+          kind: 'heal', x: hand.x, y: hand.y - 10, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60,
           life: 0, max: rand(0.8, 1.5), size: rand(8, 14), drag: 2, g: -30,
         });
       }
@@ -350,12 +394,9 @@
   let whips = [];
   function buildWhips() {
     if (state.mode === 2) {
-      whips = [
-        new Whip(-CFG.dualOffset, Math.PI / 2 + 0.55, -0.4),
-        new Whip(CFG.dualOffset, Math.PI / 2 - 0.55, 0.4),
-      ];
+      whips = [new Whip(-CFG.dualOffset, -0.45, -0.4), new Whip(CFG.dualOffset, 0.45, 0.4)];
     } else if (state.mode === 1) {
-      whips = [new Whip(0, Math.PI / 2 - 0.35, 0)];
+      whips = [new Whip(0, 0.35, 0)];
     } else {
       whips = [];
     }
@@ -363,26 +404,18 @@
   buildWhips();
 
   // ======================= Input =======================
-  window.korbaj.onCursor((p) => {
-    cursor.x = p.x; cursor.y = p.y;
-    if (!cursor.has) {
-      cursor.has = true;
-      anchor.x = p.x; anchor.y = p.y;
-      whips.forEach((w) => w.reset(p.x, p.y));
-    }
-  });
-
-  // DOM fallback (Active mode, or if polling ever stalls)
-  window.addEventListener('mousemove', (e) => { cursor.x = e.clientX; cursor.y = e.clientY; cursor.has = true; });
+  window.korbaj.onCursor((p) => pushSample(p.x, p.y));
+  window.addEventListener('mousemove', (e) => { if (!state.passive) pushSample(e.clientX, e.clientY); });
 
   window.addEventListener('mousedown', (e) => {
     sound.resume();
     if (state.passive || e.button !== 0) return;
-    if (state.mode === 3) {
-      pat.reversals.push(clock, clock, clock); // a click is a deliberate pat
-      return;
-    }
-    whips.forEach((w) => w.snap());
+    if (state.mode === 3) { pat.reversals.push(clock, clock, clock); return; }
+    // Scripted wrist flick: the hand itself moves; physics produces the crack.
+    const a = whips.length ? whips[0].handleAngle() : Math.PI / 2;
+    flick.dx = -Math.cos(a) * 70; flick.dy = -Math.sin(a) * 70 - 20;
+    flick.t = 0;
+    whips.forEach((w) => { w.forceCrackAt = clock + CFG.clickFlick + 0.06; });
   });
   window.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -420,26 +453,29 @@
   }
   updateHUD();
 
-  // ======================= Simulation loop =======================
+  // ======================= Simulation =======================
   let acc = 0;
-  let last = performance.now();
+  let simTime = performance.now() / 1000 - CFG.renderDelay;
 
-  function simulate(frameDt) {
+  function simulate(frameDt, nowSec) {
     acc = Math.min(acc + frameDt, CFG.substep * CFG.maxSubsteps);
-    const steps = Math.floor(acc / CFG.substep);
-    if (steps === 0) return;
-    const sx = anchor.x, sy = anchor.y;
-    for (let s = 1; s <= steps; s++) {
-      // Interpolate the anchor across substeps so fast flicks are not quantised to frames
-      const t = s / steps;
-      const ax = lerp(sx, cursor.x, t), ay = lerp(sy, cursor.y, t);
-      const avx = (ax - anchor.x) / CFG.substep, avy = (ay - anchor.y) / CFG.substep;
-      anchor.vx = lerp(anchor.vx, avx, 0.35);
-      anchor.vy = lerp(anchor.vy, avy, 0.35);
-      anchor.x = ax; anchor.y = ay;
-      for (const w of whips) w.step(CFG.substep, ax, ay, anchor.vx, anchor.vy);
-      clock += CFG.substep;
-      acc -= CFG.substep;
+    const dt = CFG.substep;
+    simTime = Math.max(simTime, nowSec - CFG.renderDelay - CFG.substep * CFG.maxSubsteps);
+    while (acc >= dt) {
+      acc -= dt;
+      simTime += dt;
+      clock += dt;
+      if (flick.t >= 0) flick.t += dt;
+      const [cx, cy] = sampleAt(Math.min(simTime, nowSec - CFG.renderDelay));
+      const [ox, oy] = flickOffset();
+      const nx = cx + ox, ny = cy + oy;
+      const vx = (nx - hand.x) / dt, vy = (ny - hand.y) / dt;
+      hand.vx = lerp(hand.vx, vx, 0.3);
+      hand.vy = lerp(hand.vy, vy, 0.3);
+      hand.speed = Math.hypot(hand.vx, hand.vy);
+      hand.peak = Math.max(hand.speed, hand.peak * Math.exp(-dt / 0.25));
+      hand.x = nx; hand.y = ny;
+      for (const w of whips) w.step(dt);
     }
   }
 
@@ -466,15 +502,14 @@
       t.vy *= Math.exp(-1.5 * dt);
     }
 
-    // Fire whip: emit flames along the cord
     if (onFire()) {
       for (const w of whips) {
-        for (let k = 0; k < 4; k++) {
+        for (let k = 0; k < 3; k++) {
           const i = 3 + ((Math.random() * (w.n - 3)) | 0);
           particles.push({
             kind: 'fire', x: w.x[i] + rand(-3, 3), y: w.y[i] + rand(-3, 3),
-            vx: rand(-25, 25) + (w.x[i] - w.px[i]) * 6, vy: rand(-140, -60),
-            life: 0, max: rand(0.25, 0.55), size: rand(10, 20) * (1 - i / w.n * 0.5), drag: 2.5, g: -200,
+            vx: rand(-25, 25), vy: rand(-140, -60),
+            life: 0, max: rand(0.25, 0.5), size: rand(8, 16) * (1 - (i / w.n) * 0.5), drag: 2.5, g: -200,
           });
         }
       }
@@ -482,173 +517,134 @@
       combo.count = 0;
       updateComboUI();
     }
-    if (particles.length > 1400) particles.splice(0, particles.length - 1400);
+    if (particles.length > 1200) particles.splice(0, particles.length - 1200);
   }
 
   // ======================= Rendering =======================
   function drawLashes() {
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     for (const l of lashes) {
       const k = l.life / l.max;
       const a = (1 - k) * (1 - k);
-      const heat = Math.max(0, 1 - k * 3); // white-hot for the first second, then scorch
-      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      const heat = Math.max(0, 1 - k * 3);
       const path = () => {
         ctx.beginPath();
         ctx.moveTo(l.pts[0][0], l.pts[0][1]);
         for (let i = 1; i < l.pts.length; i++) ctx.lineTo(l.pts[i][0], l.pts[i][1]);
       };
-      // dark scorch underlay
       path();
-      ctx.strokeStyle = `rgba(40,12,4,${0.55 * a})`;
-      ctx.lineWidth = l.w + 5;
+      ctx.strokeStyle = `rgba(40,12,4,${0.45 * a})`;
+      ctx.lineWidth = l.w + 4;
       ctx.stroke();
-      // glow
       ctx.globalCompositeOperation = 'lighter';
       path();
-      ctx.strokeStyle = l.fire ? `rgba(255,90,10,${0.5 * a})` : `rgba(255,60,40,${0.4 * a})`;
-      ctx.lineWidth = l.w + 7 * a;
+      ctx.strokeStyle = l.fire ? `rgba(255,90,10,${0.45 * a})` : `rgba(255,70,40,${0.35 * a})`;
+      ctx.lineWidth = l.w + 6 * a;
       ctx.stroke();
       path();
-      ctx.strokeStyle = `rgba(255,${(200 + 55 * heat) | 0},${(120 + 135 * heat) | 0},${0.85 * a})`;
+      ctx.strokeStyle = `rgba(255,${(200 + 55 * heat) | 0},${(120 + 135 * heat) | 0},${0.8 * a})`;
       ctx.lineWidth = Math.max(0.8, l.w * 0.45);
       ctx.stroke();
       ctx.globalCompositeOperation = 'source-over';
     }
   }
 
-  function drawHandle(w) {
-    const [gx, gy] = w.grip(anchor.x, anchor.y);
-    ctx.save();
-    ctx.translate(gx, gy);
-    ctx.rotate(w.angle);
-    const L = CFG.handleLen;
-
-    // drop shadow
-    ctx.fillStyle = 'rgba(0,0,0,0.28)';
-    ctx.beginPath();
-    ctx.ellipse(L / 2 + 4, 6, L / 2 + 6, 6, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // wooden core
-    const wood = ctx.createLinearGradient(0, -7, 0, 7);
-    wood.addColorStop(0, '#c08a52');
-    wood.addColorStop(0.35, '#8a5428');
-    wood.addColorStop(1, '#3f210c');
-    ctx.fillStyle = wood;
-    ctx.beginPath();
-    ctx.moveTo(4, -6.5);
-    ctx.lineTo(L - 4, -4.2);
-    ctx.quadraticCurveTo(L, 0, L - 4, 4.2);
-    ctx.lineTo(4, 6.5);
-    ctx.closePath();
-    ctx.fill();
-
-    // braided leather wrap
-    ctx.lineWidth = 1.4;
-    for (let s = 10; s < L - 8; s += 5) {
-      const h = lerp(6.3, 4.4, s / L);
-      ctx.strokeStyle = 'rgba(30,14,4,0.75)';
-      ctx.beginPath(); ctx.moveTo(s, -h); ctx.lineTo(s + 4, h); ctx.stroke();
-      ctx.strokeStyle = 'rgba(255,210,160,0.22)';
-      ctx.beginPath(); ctx.moveTo(s + 1, -h); ctx.lineTo(s + 5, h); ctx.stroke();
+  // Catmull-Rom resample of the cord, then build a tapered outline polygon.
+  function cordOutline(w) {
+    const P = [];
+    for (let i = 1; i < w.n; i++) P.push([w.x[i], w.y[i]]);
+    const pts = [];
+    const SUB = 3;
+    for (let i = 0; i < P.length - 1; i++) {
+      const p0 = P[Math.max(0, i - 1)], p1 = P[i], p2 = P[i + 1], p3 = P[Math.min(P.length - 1, i + 2)];
+      for (let s = 0; s < SUB; s++) {
+        const t = s / SUB, t2 = t * t, t3 = t2 * t;
+        pts.push([
+          0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
+          0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3),
+        ]);
+      }
     }
+    pts.push(P[P.length - 1]);
+    const L = [], R = [];
+    const N = pts.length;
+    for (let i = 0; i < N; i++) {
+      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(N - 1, i + 1)];
+      let tx = b[0] - a[0], ty = b[1] - a[1];
+      const tl = Math.hypot(tx, ty) || 1;
+      tx /= tl; ty /= tl;
+      const u = i / (N - 1);
+      const half = lerp(3.4, 0.55, Math.pow(u, 0.7));
+      L.push([pts[i][0] - ty * half, pts[i][1] + tx * half]);
+      R.push([pts[i][0] + ty * half, pts[i][1] - tx * half]);
+    }
+    return { pts, L, R };
+  }
 
-    // brass ferrule at cord end
-    const brass = ctx.createLinearGradient(0, -5, 0, 5);
-    brass.addColorStop(0, '#fff1b0'); brass.addColorStop(0.5, '#c9962c'); brass.addColorStop(1, '#5c3d08');
-    ctx.fillStyle = brass;
-    ctx.fillRect(L - 9, -4.8, 6, 9.6);
-
-    // pommel knob
-    const knob = ctx.createRadialGradient(-1, -3, 1, 0, 0, 9);
-    knob.addColorStop(0, '#ffe6a0'); knob.addColorStop(0.45, '#b8862a'); knob.addColorStop(1, '#4a2c06');
-    ctx.fillStyle = knob;
-    ctx.beginPath(); ctx.arc(0, 0, 8.5, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1; ctx.stroke();
-
-    // specular highlight along the top
-    ctx.strokeStyle = 'rgba(255,240,210,0.35)';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.moveTo(9, -4.8); ctx.lineTo(L - 10, -3.2); ctx.stroke();
-    ctx.restore();
+  function tracePoly(L, R) {
+    ctx.beginPath();
+    ctx.moveTo(L[0][0], L[0][1]);
+    for (let i = 1; i < L.length; i++) ctx.lineTo(L[i][0], L[i][1]);
+    for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]);
+    ctx.closePath();
   }
 
   function drawCord(w) {
-    const { n, x, y } = w;
+    const { pts, L, R } = cordOutline(w);
     const fire = onFire();
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 
-    // Smooth the polyline with midpoint quadratic curves, segment by segment for taper
-    const mid = (i) => [(x[i] + x[i + 1]) / 2, (y[i] + y[i + 1]) / 2];
-    const segPath = (i) => {
-      ctx.beginPath();
-      const [m0x, m0y] = i === 0 ? [x[0], y[0]] : mid(i - 1);
-      const [m1x, m1y] = i >= n - 2 ? [x[n - 1], y[n - 1]] : mid(i);
-      ctx.moveTo(m0x, m0y);
-      ctx.quadraticCurveTo(x[i], y[i], m1x, m1y);
-    };
-    const thick = (i) => lerp(7.5, 1.3, Math.pow(i / (n - 1), 0.8));
-
-    // shadow pass
-    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
-    for (let i = 0; i < n - 3; i++) {
-      ctx.save(); ctx.translate(3, 5); segPath(i); ctx.lineWidth = thick(i); ctx.stroke(); ctx.restore();
-    }
+    // soft drop shadow
+    ctx.save();
+    ctx.translate(4, 6);
+    tracePoly(L, R);
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.fill();
+    ctx.restore();
 
     if (fire) {
       ctx.globalCompositeOperation = 'lighter';
-      for (let i = 0; i < n - 1; i++) {
-        segPath(i);
-        ctx.strokeStyle = `rgba(255,${(90 + Math.random() * 60) | 0},0,0.35)`;
-        ctx.lineWidth = thick(i) + 9;
-        ctx.stroke();
-      }
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.strokeStyle = 'rgba(255,110,10,0.45)';
+      ctx.lineWidth = 12;
+      ctx.stroke();
       ctx.globalCompositeOperation = 'source-over';
     }
 
-    // leather body (fall excluded)
-    for (let i = 0; i < n - 3; i++) {
-      const t = i / n;
-      segPath(i);
-      ctx.strokeStyle = fire
-        ? `rgb(${(110 + 90 * t) | 0},${(40 + 20 * t) | 0},12)`
-        : `rgb(${(92 + 40 * t) | 0},${(52 + 26 * t) | 0},${(26 + 14 * t) | 0})`;
-      ctx.lineWidth = thick(i);
-      ctx.stroke();
-    }
-    // braid texture: alternating dark ticks + highlight line
-    for (let i = 0; i < n - 3; i++) {
-      segPath(i);
-      ctx.setLineDash([2, 3]);
-      ctx.lineDashOffset = i * 1.7;
-      ctx.strokeStyle = 'rgba(20,8,2,0.55)';
-      ctx.lineWidth = thick(i) * 0.7;
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-    for (let i = 0; i < n - 3; i++) {
-      segPath(i);
-      ctx.strokeStyle = fire ? 'rgba(255,220,120,0.55)' : 'rgba(255,215,170,0.28)';
-      ctx.lineWidth = Math.max(0.6, thick(i) * 0.22);
-      ctx.stroke();
-    }
+    // body: dark outline + light leather fill (reads on both dark terminals and light pages)
+    tracePoly(L, R);
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(25,14,6,0.9)';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.fillStyle = fire ? '#ffd9a0' : '#efe3cc';
+    ctx.fill();
 
-    // fall + cracker (light, thin) at the very end
-    for (let i = n - 3; i < n - 1; i++) {
-      segPath(i);
-      ctx.strokeStyle = fire ? '#ffe0a0' : '#e6d2ac';
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
+    // highlight running down one side
+    ctx.beginPath();
+    const hl = Math.floor(pts.length * 0.8);
+    for (let i = 0; i < hl; i++) {
+      const p = L[i], c = pts[i];
+      const hx = lerp(c[0], p[0], 0.45), hy = lerp(c[1], p[1], 0.45);
+      if (i === 0) ctx.moveTo(hx, hy); else ctx.lineTo(hx, hy);
     }
-    // frayed tuft
-    const tx = x[n - 1], ty = y[n - 1];
-    const ang = Math.atan2(y[n - 1] - y[n - 2], x[n - 1] - x[n - 2]);
-    ctx.strokeStyle = fire ? 'rgba(255,240,190,0.95)' : 'rgba(245,235,215,0.9)';
-    ctx.lineWidth = 0.8;
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    ctx.lineWidth = 0.9;
+    ctx.stroke();
+
+    // cracker tuft
+    const n = w.n;
+    const tx = w.x[n - 1], ty = w.y[n - 1];
+    const ang = Math.atan2(w.y[n - 1] - w.y[n - 2], w.x[n - 1] - w.x[n - 2]);
+    ctx.strokeStyle = 'rgba(30,20,10,0.85)';
+    ctx.lineWidth = 1;
+    ctx.lineCap = 'round';
     for (let k = -2; k <= 2; k++) {
-      const a = ang + k * 0.22;
+      const a = ang + k * 0.2;
       ctx.beginPath(); ctx.moveTo(tx, ty);
-      ctx.lineTo(tx + Math.cos(a) * 7, ty + Math.sin(a) * 7);
+      ctx.lineTo(tx + Math.cos(a) * 8, ty + Math.sin(a) * 8);
       ctx.stroke();
     }
     if (fire) {
@@ -656,6 +652,70 @@
       ctx.drawImage(SPR.fire, tx - 14, ty - 14, 28, 28);
       ctx.globalCompositeOperation = 'source-over';
     }
+  }
+
+  function drawHandle(w) {
+    const gx = w.x[0], gy = w.y[0];
+    const L = Math.hypot(w.x[1] - gx, w.y[1] - gy);
+    ctx.save();
+    ctx.translate(gx, gy);
+    ctx.rotate(w.handleAngle());
+
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(L / 2 + 4, 6, L / 2 + 6, 6.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // golden lacquered wood, slightly flared toward the grip
+    const body = () => {
+      ctx.beginPath();
+      ctx.moveTo(2, -6.8);
+      ctx.bezierCurveTo(L * 0.4, -6, L * 0.75, -4.8, L - 2, -4.2);
+      ctx.quadraticCurveTo(L + 2, 0, L - 2, 4.2);
+      ctx.bezierCurveTo(L * 0.75, 4.8, L * 0.4, 6, 2, 6.8);
+      ctx.closePath();
+    };
+    const wood = ctx.createLinearGradient(0, -7, 0, 7);
+    wood.addColorStop(0, '#fff2b0');
+    wood.addColorStop(0.3, '#f2c33c');
+    wood.addColorStop(0.75, '#b97a12');
+    wood.addColorStop(1, '#6b3f06');
+    body();
+    ctx.fillStyle = wood;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(40,22,2,0.9)';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // grip wrap (spiral)
+    ctx.save();
+    body(); ctx.clip();
+    ctx.strokeStyle = 'rgba(90,50,5,0.55)';
+    ctx.lineWidth = 1.2;
+    for (let s = 12; s < L * 0.72; s += 5) {
+      ctx.beginPath(); ctx.moveTo(s, -8); ctx.lineTo(s + 5, 8); ctx.stroke();
+    }
+    ctx.restore();
+
+    // dark ferrule where the cord leaves
+    ctx.fillStyle = '#3a2408';
+    ctx.fillRect(L - 8, -4.6, 5, 9.2);
+    ctx.fillStyle = 'rgba(255,230,160,0.5)';
+    ctx.fillRect(L - 8, -4.6, 5, 1.6);
+
+    // pommel at the cursor
+    const knob = ctx.createRadialGradient(-2, -3, 1, 0, 0, 9);
+    knob.addColorStop(0, '#fff6cf'); knob.addColorStop(0.5, '#d9a52a'); knob.addColorStop(1, '#5a3605');
+    ctx.fillStyle = knob;
+    ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(40,22,2,0.9)'; ctx.lineWidth = 1.2; ctx.stroke();
+
+    // specular
+    ctx.strokeStyle = 'rgba(255,255,240,0.7)';
+    ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.moveTo(10, -4.4); ctx.lineTo(L * 0.8, -3); ctx.stroke();
+    ctx.restore();
   }
 
   function drawFX() {
@@ -671,9 +731,8 @@
       if (r.life < 0) continue;
       const k = r.life / r.max;
       const e = 1 - Math.pow(1 - k, 3);
-      const rad = lerp(r.r0, r.r1, e);
       ctx.beginPath();
-      ctx.arc(r.x, r.y, rad, 0, Math.PI * 2);
+      ctx.arc(r.x, r.y, lerp(r.r0, r.r1, e), 0, Math.PI * 2);
       ctx.strokeStyle = r.fire ? `rgba(255,140,40,${(1 - k) * 0.9})` : `rgba(255,245,210,${(1 - k) * 0.85})`;
       ctx.lineWidth = r.w * (1 - k) + 0.5;
       ctx.stroke();
@@ -686,20 +745,13 @@
         ctx.lineWidth = p.size;
         ctx.beginPath();
         ctx.moveTo(p.x, p.y);
-        ctx.lineTo(p.x - p.vx * 0.022, p.y - p.vy * 0.022);
+        ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02);
         ctx.stroke();
-        ctx.globalAlpha = a;
-        ctx.drawImage(SPR.spark, p.x - 5, p.y - 5, 10, 10);
-        ctx.globalAlpha = 1;
-      } else if (p.kind === 'fire') {
-        const s = p.size * (1 - k * 0.6);
+      } else {
+        const spr = p.kind === 'fire' ? SPR.fire : SPR.heal;
+        const s = p.kind === 'fire' ? p.size * (1 - k * 0.6) : p.size * (0.5 + 0.5 * Math.sin(k * Math.PI));
         ctx.globalAlpha = a * 0.9;
-        ctx.drawImage(SPR.fire, p.x - s, p.y - s, s * 2, s * 2);
-        ctx.globalAlpha = 1;
-      } else if (p.kind === 'heal') {
-        const s = p.size * (0.5 + 0.5 * Math.sin(k * Math.PI));
-        ctx.globalAlpha = a;
-        ctx.drawImage(SPR.heal, p.x - s, p.y - s, s * 2, s * 2);
+        ctx.drawImage(spr, p.x - s, p.y - s, s * 2, s * 2);
         ctx.globalAlpha = 1;
       }
     }
@@ -721,12 +773,11 @@
       ctx.rotate(t.rot);
       ctx.scale(pop, pop);
       ctx.globalAlpha = a;
-      ctx.font = `${t.kind === 3 ? 600 : 800} ${t.size}px "Segoe UI", "Noto Sans Arabic", "Noto Sans", Ubuntu, sans-serif`;
       ctx.shadowColor = t.glow;
       ctx.shadowBlur = 16;
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0,0,0,0.65)';
-      ctx.direction = /[\u0600-\u06FF]/.test(t.str) ? 'rtl' : 'ltr';
+      ctx.direction = /[؀-ۿ]/.test(t.str) ? 'rtl' : 'ltr';
       ctx.strokeText(t.str, 0, 0);
       ctx.fillStyle = t.fill;
       ctx.fillText(t.str, 0, 0);
@@ -738,7 +789,7 @@
 
   function drawPatHand() {
     ctx.save();
-    ctx.translate(cursor.x, cursor.y);
+    ctx.translate(hand.x, hand.y);
     ctx.rotate(pat.wobble + Math.sin(clock * 3) * 0.04);
     ctx.globalCompositeOperation = 'lighter';
     ctx.globalAlpha = 0.35;
@@ -753,18 +804,19 @@
   }
 
   // ======================= Main loop =======================
+  let last = performance.now();
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
 
-    simulate(dt);
+    simulate(dt, now / 1000);
 
     if (state.mode === 3) {
-      updatePat(dt, anchor.vx, anchor.vy);
+      updatePat(dt);
     } else {
       let maxTip = 0;
-      for (const w of whips) maxTip = Math.max(maxTip, w.tipSpeed);
-      sound.whoosh(maxTip / 60); // px/s -> px/frame@60
+      for (const w of whips) maxTip = Math.max(maxTip, w.tipEma);
+      sound.whoosh(Math.max(0, maxTip - 900) / 60);
     }
     updateFX(dt);
 

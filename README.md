@@ -24,8 +24,8 @@ Or pat it gently when it ships clean code. ✋
 
 | | |
 |---|---|
-| 🪢 **Verlet whip physics** | 28-node rope, 120 Hz substeps, mass tapered toward the tip, so the loop speeds up like a real bullwhip |
-| 💥 **Real crack detection** | Cracks when the tip passes 3400 px/s after a flick, or on click in Active mode |
+| 🪢 **Real whip physics** | Rigid handle hinged at the cursor (swings & rotates), 26-node Verlet cord, 240 Hz substeps, gravity, quadratic air drag, exponential mass taper (tip 40× lighter), so the loop accelerates like a real bullwhip |
+| 💥 **Real crack detection** | Only on deliberate fast moves or flicks: tip past the sound-barrier threshold, cord fully extended, hand moving fast. Tiny moves never crack |
 | 🔥 **Fire Whip combo** | 5+ cracks inside 2 s sets the cord on fire |
 | ⚡ **VFX** | Shockwave rings, white-hot flash, spark showers, burn marks that fade over 3 s |
 | 🔊 **Procedural sound** | Whoosh that follows speed, a 5-layer crack (snap, hiss, resonant sweep, sub thump, room echo), soft chimes. No audio files needed |
@@ -37,8 +37,8 @@ Or pat it gently when it ships clean code. ✋
 
 <table>
 <tr>
-<td align="center"><img src="docs/fire.png" width="420"/><br/><b>🔥 Fire Whip combo</b></td>
-<td align="center"><img src="docs/dual.png" width="420"/><br/><b>⚔️ Dual Whips</b></td>
+<td align="center"><img src="docs/fire.png" width="420"/><br/><b>💥 Flick → crack → combo</b></td>
+<td align="center"><img src="docs/dual.png" width="420"/><br/><b>🔥 Dual Whips on fire (5+ combo)</b></td>
 </tr>
 <tr>
 <td align="center" colspan="2"><img src="docs/pat.png" width="420"/><br/><b>✋ Pat Mode: عاش يا وحش</b></td>
@@ -120,7 +120,9 @@ All tunables live in `CFG` at the top of `renderer.js`:
 
 | Key | Default | Effect |
 |---|---|---|
-| `crackSpeed` | `3400` | Lower = easier cracks |
+| `intentSpeed` | `2300` | Minimum hand speed (px/s) for a crack. Lower = easier cracks |
+| `crackSpeedFactor` | `3.0` | Tip-speed threshold × screen height per second |
+| `wrist` | `0.012` | Lower = handle swings more freely |
 | `nodes` / `segLen` | `28` / `10.5` | Cord length and resolution |
 | `fireAt` | `5` | Combo needed for Fire Whip |
 | `tauntChance` | `0.4` | How often taunts pop up |
