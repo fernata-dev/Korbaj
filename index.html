@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:;" />
+  <title>Korbaj</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      overflow: hidden; background: transparent;
+      user-select: none; -webkit-user-select: none;
+      font-family: "Segoe UI", "SF Pro Text", "Noto Sans", "Noto Sans Arabic", Ubuntu, sans-serif;
+    }
+    body.active { cursor: crosshair; }
+    body.pat.active { cursor: none; }
+    canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+
+    #hud {
+      position: fixed; top: 14px; right: 14px;
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 14px 7px 10px;
+      border-radius: 999px;
+      background: rgba(14, 14, 18, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255,255,255,0.06);
+      backdrop-filter: blur(10px);
+      color: #e8e8ee; font-size: 12px; letter-spacing: 0.2px;
+      opacity: 0; transform: translateY(-6px);
+      transition: opacity 0.45s ease, transform 0.45s ease;
+      pointer-events: none; white-space: nowrap;
+    }
+    #hud.show { opacity: 1; transform: translateY(0); }
+    #hud .brand { font-weight: 700; color: #ff6a3d; display: flex; align-items: center; gap: 6px; }
+    #hud .dot { width: 8px; height: 8px; border-radius: 50%; background: #ff6a3d; box-shadow: 0 0 8px #ff6a3d; }
+    #hud .sep { width: 1px; height: 14px; background: rgba(255,255,255,0.15); }
+    #hud .k { opacity: 0.45; transition: opacity .2s, color .2s; }
+    #hud .k.on { opacity: 1; color: #fff; font-weight: 600; }
+    #hud .k.on.pat { color: #57f5c4; }
+    #hud .k.ct.on { color: #7fc8ff; }
+    #hud .k b { color: #ffb36b; font-weight: 600; }
+
+    #combo {
+      position: fixed; top: 54px; right: 18px;
+      color: #ffd38a; font-weight: 800; font-size: 13px; letter-spacing: 1px;
+      text-shadow: 0 0 10px rgba(255, 120, 30, 0.8);
+      opacity: 0; transition: opacity .3s; pointer-events: none;
+    }
+    #combo.show { opacity: 0.9; }
+    #combo.fire { color: #fff1c2; text-shadow: 0 0 12px #ff5a00, 0 0 24px #ff2a00; }
+
+    #toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      padding: 8px 16px; border-radius: 10px;
+      background: rgba(120, 20, 20, 0.85); color: #fff; font-size: 12px;
+      opacity: 0; transition: opacity .4s; pointer-events: none;
+    }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <div id="hud">
+    <span class="brand"><span class="dot"></span>Korbaj</span>
+    <span class="sep"></span>
+    <span class="k" data-mode="1"><b>[1]</b> Whip</span>
+    <span class="k" data-mode="2"><b>[2]</b> Dual</span>
+    <span class="k pat" data-mode="3"><b>[3]</b> Pat</span>
+    <span class="sep"></span>
+    <span class="k on"><b>[Alt+W]</b> Hide</span>
+    <span class="k ct" id="hud-ct"><b>[Alt+C]</b> Click-Through</span>
+  </div>
+  <div id="combo"></div>
+  <div id="toast"></div>
+
+  <script src="sound.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
