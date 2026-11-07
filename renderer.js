@@ -127,7 +127,7 @@
       cursor.has = true;
       samples.length = 0;
       samples.push({ x, y, t: t - 1 });
-      hand.x = x; hand.y = y;
+      hand.x = x; hand.y = y; hand.vx = hand.vy = hand.speed = hand.peak = 0;
       whips.forEach((w) => w.reset());
     }
     samples.push({ x, y, t });
@@ -405,6 +405,8 @@
 
   // ======================= Input =======================
   window.korbaj.onCursor((p) => pushSample(p.x, p.y));
+  // Overlay jumped to another monitor: re-seat the whip instead of 'teleporting' it (no fake crack)
+  window.korbaj.onDisplay(() => { cursor.has = false; });
   window.addEventListener('mousemove', (e) => { if (!state.passive) pushSample(e.clientX, e.clientY); });
 
   window.addEventListener('mousedown', (e) => {

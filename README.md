@@ -65,7 +65,6 @@ npm run fix-electron  # "Electron failed to install correctly" → re-download t
 
 ```bash
 npm run start:nogpu   # black background / GPU glitches
-npm run start:x11     # Wayland blocking shortcuts → run through XWayland
 ```
 
 ## ⌨️ Controls
@@ -127,18 +126,60 @@ All tunables live in `CFG` at the top of `renderer.js`:
 | `fireAt` | `5` | Combo needed for Fire Whip |
 | `tauntChance` | `0.4` | How often taunts pop up |
 
-## 🐧 Platform notes
+## 🐧 Linux / Wayland (Hyprland, GNOME, KDE…)
 
-- **Wayland (GNOME/KDE):** the compositor may block global shortcuts. Use `npm run start:x11` or the tray.
-- **macOS:** a real `fullscreen: true` opens a separate Space and hides your apps, so Korbaj sizes the window
-  to the display instead. Set `KORBAJ_TRUE_FULLSCREEN=1` to force the literal flag.
-- **Multi-monitor:** the overlay covers the display your cursor is on when you summon it.
+Wayland deliberately forbids apps from (a) reading the global cursor and (b) grabbing global
+keys. Korbaj works around both:
+
+| Problem | Korbaj's answer |
+|---|---|
+| Cursor position hidden | On **Hyprland** it reads the cursor over Hyprland's IPC socket (any monitor). Elsewhere it uses XWayland |
+| Click-through | Runs under **XWayland** (`npm start` passes `--ozone-platform=x11`), where input pass-through works |
+| Window gets tiled / steals the screen | On Hyprland it makes itself floating, pinned to all workspaces, and borderless, then gives focus back |
+| Global shortcuts blocked | Bind `bin/korbaj.js` in your compositor. It talks to the running app over a local socket |
+
+### Hyprland setup (one line)
+
+```ini
+# ~/.config/hypr/hyprland.conf
+source = ~/Korbaj/extras/hyprland.conf
+```
+
+That gives you `Alt+W / Alt+C / Alt+1-3 / Alt+Shift+Q` system-wide. `Alt+W` also **starts**
+Korbaj if it isn't running.
+
+### Control from anywhere (any OS, any hotkey tool)
+
+```bash
+node bin/korbaj.js toggle     # summon / hide (starts it if needed)
+node bin/korbaj.js passive    # click-through ↔ active
+node bin/korbaj.js mode 2     # 1 whip · 2 dual · 3 pat
+node bin/korbaj.js status
+node bin/korbaj.js quit
+```
+
+On startup the terminal prints what Korbaj detected, e.g.
+`[korbaj] session=wayland desktop=Hyprland cursor=hyprland shortcuts=ok`. Include that line when reporting bugs.
+
+**GNOME / KDE on Wayland:** there's no cursor IPC, so in click-through mode the whip only follows the
+cursor while it's over XWayland windows. Use Active mode (`passive` command) or log into an X11
+session for the full experience.
+
+### Other platforms
+
+- **macOS:** a real `fullscreen: true` opens a separate Space, so the window is sized to the display instead
+  (`KORBAJ_TRUE_FULLSCREEN=1` forces it).
+- **Multi-monitor:** the overlay jumps to whichever monitor your cursor is on.
 
 ## 📁 Project structure
 
 ```
 Korbaj/
-├── main.js          # window, shortcuts, tray, cursor polling
+├── main.js          # window, shortcuts, tray, cursor polling, monitor follow
+├── lib/hyprland.js  # Hyprland IPC: global cursor + overlay window setup
+├── lib/control.js   # local control socket
+├── bin/korbaj.js    # CLI: toggle / passive / mode / quit
+├── extras/hyprland.conf
 ├── preload.js       # secure IPC bridge
 ├── index.html       # canvas + HUD
 ├── renderer.js      # physics, VFX, modes

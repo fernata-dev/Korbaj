@@ -6,12 +6,13 @@
   "main": "main.js",
   "license": "MIT",
   "scripts": {
-    "start": "electron .",
-    "start:nogpu": "electron . --disable-gpu",
-    "start:x11": "electron . --ozone-platform=x11",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check sound.js",
+    "start": "electron . --ozone-platform=x11",
+    "start:nogpu": "electron . --ozone-platform=x11 --disable-gpu",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check sound.js && node --check lib/hyprland.js && node --check lib/control.js && node --check bin/korbaj.js",
     "postinstall": "node scripts/ensure-electron.js",
-    "fix-electron": "node scripts/ensure-electron.js --force"
+    "fix-electron": "node scripts/ensure-electron.js --force",
+    "start:wayland": "electron . --ozone-platform=wayland",
+    "ctl": "node bin/korbaj.js"
   },
   "devDependencies": {
     "electron": "45.2.3"
@@ -21,5 +22,8 @@
   },
   "allowScripts": {
     "electron@45.2.3": true
+  },
+  "bin": {
+    "korbaj": "bin/korbaj.js"
   }
 }
