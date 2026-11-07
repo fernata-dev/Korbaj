@@ -4,8 +4,10 @@
  *
  * Physics model (all in CSS px and seconds, fixed 240 Hz substeps):
  *   node 0      grip — kinematic, follows the (interpolated) cursor
- *   node 1      end of the handle — heavy rigid stick hinged at the grip, with a soft
- *               "wrist" spring toward a rest angle. It swings and rotates naturally.
+ *   node 1      end of the handle — a rigid body (angle θ, angular velocity ω, inertia)
+ *               driven by real torques: a wrist spring-damper that aims it along the
+ *               direction you move, the pseudo-force of the hand's acceleration
+ *               (so a sudden flick swings it), gravity, and the cord pulling back on it.
  *   node 2..N   cord — point masses joined by inextensible distance constraints,
  *               lighter toward the tip (tapered mass), gravity + quadratic air drag.
  *
@@ -25,9 +27,13 @@
     gravity: 1800,              // px/s²
     airDrag: 0.00055,           // quadratic drag coefficient (1/px)
     linDamp: 0.9996,            // tiny internal friction per substep
-    handleInvMass: 0.12,        // handle is ~8× heavier than a cord node
+    handleInvMass: 0.04,        // how much the cord can drag the handle (lower = heavier handle)
+    wristFreq: 15,              // rad/s — natural frequency of the wrist (higher = stiffer)
+    wristDamping: 0.38,         // damping ratio (<1 = slight overshoot / follow-through)
+    leadSpeed: 650,             // px/s — at this hand speed the handle points halfway toward the motion
+    handleInertia: 0.7,         // how strongly hand acceleration swings the handle
+    handleGravity: 0.35,        // how much gravity sags the handle against the wrist
     tipMassRatio: 40,           // tip is 40× lighter than the cord root (exponential taper)
-    wrist: 0.012,               // wrist spring stiffness toward rest angle (per substep) — low = handle swings freely
     iterations: 16,
     substep: 1 / 240,
     maxSubsteps: 12,
@@ -127,7 +133,7 @@
       cursor.has = true;
       samples.length = 0;
       samples.push({ x, y, t: t - 1 });
-      hand.x = x; hand.y = y; hand.vx = hand.vy = hand.speed = hand.peak = 0;
+      hand.x = x; hand.y = y; hand.vx = hand.vy = hand.ax = hand.ay = hand.speed = hand.peak = 0;
       whips.forEach((w) => w.reset());
     }
     samples.push({ x, y, t });
@@ -148,7 +154,7 @@
   }
 
   // The "hand" = interpolated cursor + scripted flick offset (click in Active mode)
-  const hand = { x: W / 2, y: H / 3, vx: 0, vy: 0, speed: 0, peak: 0 };
+  const hand = { x: W / 2, y: H / 3, vx: 0, vy: 0, ax: 0, ay: 0, speed: 0, peak: 0 };
   const flick = { t: -1, dx: 0, dy: 0 };
   function flickOffset() {
     if (flick.t < 0) return [0, 0];
@@ -181,6 +187,8 @@
         this.len[i] = CFG.segLen;
       }
       this.cordLen = CFG.segLen * (n - 2);
+      this.th = Math.PI / 2 - restAngle; // screen angle of the handle (π/2 = straight down)
+      this.om = 0;
       this.tipEma = 0;
       this.armed = true;
       this.cooldown = 0;
@@ -201,10 +209,48 @@
         }
         this.x[i] = this.px[i] = x; this.y[i] = this.py[i] = y;
       }
+      this.th = Math.PI / 2 - this.restAngle;
+      this.om = 0;
       this.tipEma = 0;
     }
 
-    handleAngle() { return Math.atan2(this.y[1] - this.y[0], this.x[1] - this.x[0]); }
+    handleAngle() { return this.th; }
+
+    /** Rigid-body handle: integrate θ, ω from wrist + inertial + gravity torques. */
+    stepHandle(dt, gx, gy) {
+      const L = this.len[1];
+      const rest = Math.PI / 2 - this.restAngle;
+      // Wrist aims the handle along the movement: blend rest direction with hand velocity
+      const tx = Math.cos(rest) + hand.vx / CFG.leadSpeed;
+      const ty = Math.sin(rest) + hand.vy / CFG.leadSpeed;
+      const target = Math.atan2(ty, tx);
+      let err = target - this.th;
+      err = Math.atan2(Math.sin(err), Math.cos(err));
+      const k = CFG.wristFreq * CFG.wristFreq;
+      const c = 2 * CFG.wristDamping * CFG.wristFreq;
+      // Uniform rod pivoting at one end: α = (3 / 2L) · (dir × g_eff), g_eff = g − a_hand
+      const gex = -hand.ax * CFG.handleInertia;
+      const gey = CFG.gravity * CFG.handleGravity - hand.ay * CFG.handleInertia;
+      const cross = Math.cos(this.th) * gey - Math.sin(this.th) * gex;
+      const alpha = k * err - c * this.om + (3 / (2 * L)) * cross;
+      this.om += alpha * dt;
+      this.om = clamp(this.om, -60, 60);
+      this.th += this.om * dt;
+      this.x[1] = gx + Math.cos(this.th) * L;
+      this.y[1] = gy + Math.sin(this.th) * L;
+    }
+
+    /** After the cord solve: the cord's pull moved node 1 — turn that into rotation. */
+    absorbCordPull(gx, gy) {
+      const L = this.len[1];
+      const nth = Math.atan2(this.y[1] - gy, this.x[1] - gx);
+      let d = nth - this.th;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      this.th += d;
+      this.om += d / CFG.substep * 0.5;
+      this.x[1] = gx + Math.cos(this.th) * L;
+      this.y[1] = gy + Math.sin(this.th) * L;
+    }
 
     step(dt) {
       const { n, x, y, px, py, w, len } = this;
@@ -213,11 +259,11 @@
       const maxStep = CFG.maxTipSpeed * dt;
 
       // --- Integrate (Verlet) with quadratic air drag: a = -c|v|v (lighter nodes feel it more) ---
-      for (let i = 1; i < n; i++) {
+      for (let i = 2; i < n; i++) {
         let vx = x[i] - px[i], vy = y[i] - py[i];
         const sp = Math.hypot(vx, vy);
         if (sp > maxStep) { vx *= maxStep / sp; vy *= maxStep / sp; }
-        const drag = Math.max(0.5, 1 - CFG.airDrag * (sp / dt) * dt * (i === 1 ? 0.2 : Math.min(3, Math.sqrt(w[i])) * 0.6));
+        const drag = Math.max(0.5, 1 - CFG.airDrag * (sp / dt) * dt * Math.min(3, Math.sqrt(w[i])) * 0.6);
         const f = drag * CFG.linDamp;
         px[i] = x[i]; py[i] = y[i];
         x[i] += vx * f;
@@ -225,12 +271,8 @@
       }
       px[0] = x[0]; py[0] = y[0];
       x[0] = gx; y[0] = gy;
-
-      // --- Wrist: soft spring pulling the handle toward its rest angle ---
-      const tx = gx + Math.sin(this.restAngle) * len[1];
-      const ty = gy + Math.cos(this.restAngle) * len[1];
-      x[1] += (tx - x[1]) * CFG.wrist;
-      y[1] += (ty - y[1]) * CFG.wrist;
+      px[1] = x[1]; py[1] = y[1];
+      this.stepHandle(dt, gx, gy);
 
       // --- Constraints (Gauss-Seidel, root → tip) ---
       for (let it = 0; it < CFG.iterations; it++) {
@@ -243,7 +285,9 @@
           x[a] += dx * c * w[a]; y[a] += dy * c * w[a];
           x[i] -= dx * c * w[i]; y[i] -= dy * c * w[i];
         }
+        x[0] = gx; y[0] = gy;
       }
+      this.absorbCordPull(gx, gy);
 
       // --- Crack detection ---
       const t = n - 1;
@@ -272,6 +316,7 @@
       this.armed = false;
       this.forceCrackAt = -1;
       stats.cracks++;
+      if (stats.log) stats.log.push(+clock.toFixed(2));
       const t = this.n - 1;
       const tx = this.x[t], ty = this.y[t];
       const vx = this.x[t] - this.px[t], vy = this.y[t] - this.py[t];
@@ -472,8 +517,11 @@
       const [ox, oy] = flickOffset();
       const nx = cx + ox, ny = cy + oy;
       const vx = (nx - hand.x) / dt, vy = (ny - hand.y) / dt;
+      const pvx = hand.vx, pvy = hand.vy;
       hand.vx = lerp(hand.vx, vx, 0.3);
       hand.vy = lerp(hand.vy, vy, 0.3);
+      hand.ax = lerp(hand.ax, (hand.vx - pvx) / dt, 0.25);
+      hand.ay = lerp(hand.ay, (hand.vy - pvy) / dt, 0.25);
       hand.speed = Math.hypot(hand.vx, hand.vy);
       hand.peak = Math.max(hand.speed, hand.peak * Math.exp(-dt / 0.25));
       hand.x = nx; hand.y = ny;
