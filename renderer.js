@@ -278,6 +278,12 @@
   let lastTauntAt = -10;
 
   function spawnText(str, x, y, fill, glow, kind) {
+    // Stack instead of overlapping: nudge up while a fresh text sits in the same spot
+    for (let guard = 0; guard < 6; guard++) {
+      const hit = texts.some((o) => o.life < o.max * 0.7 && Math.abs(o.x - x) < 170 && Math.abs(o.y - y) < 30);
+      if (!hit) break;
+      y -= 32;
+    }
     texts.push({
       str, x: clamp(x, 80, W - 80), y: clamp(y, 40, H - 20),
       vy: kind === 3 ? -40 : -55, vx: rand(-15, 15),
@@ -707,6 +713,9 @@
       const k = t.life / t.max;
       const pop = k < 0.12 ? 0.6 + (k / 0.12) * 0.55 : k < 0.2 ? 1.15 - ((k - 0.12) / 0.08) * 0.15 : 1;
       const a = k > 0.65 ? 1 - (k - 0.65) / 0.35 : 1;
+      ctx.font = `${t.kind === 3 ? 600 : 800} ${t.size}px "Segoe UI", "Noto Sans Arabic", "Noto Sans", Ubuntu, sans-serif`;
+      if (t.halfW === undefined) t.halfW = ctx.measureText(t.str).width / 2 + 14;
+      t.x = clamp(t.x, t.halfW, W - t.halfW);
       ctx.save();
       ctx.translate(t.x, t.y);
       ctx.rotate(t.rot);
