@@ -32,8 +32,13 @@ if (force) {
   fs.rmSync(path.join(dir, 'dist'), { recursive: true, force: true });
   fs.rmSync(path.join(dir, 'path.txt'), { force: true });
 }
+if (process.env.ELECTRON_SKIP_BINARY_DOWNLOAD) {
+  console.warn('[korbaj] ELECTRON_SKIP_BINARY_DOWNLOAD is set in your shell — ignoring it for this download.');
+}
 console.log('[korbaj] Downloading Electron binary...');
-const r = spawnSync(process.execPath, [path.join(dir, 'install.js')], { cwd: dir, stdio: 'inherit' });
+const r = spawnSync(process.execPath, [path.join(dir, 'install.js')], {
+  cwd: dir, stdio: 'inherit', env: { ...process.env, ELECTRON_SKIP_BINARY_DOWNLOAD: '' },
+});
 if (r.status !== 0 || !installed()) {
   console.error('[korbaj] Electron download failed. Check your network/proxy, then run: npm run fix-electron');
   process.exit(1);
