@@ -24,9 +24,10 @@ Or pat it gently when it ships clean code. ✋
 
 | | |
 |---|---|
-| 🪢 **Real whip physics** | Rigid handle hinged at the cursor (swings & rotates), 26-node Verlet cord, 240 Hz substeps, gravity, quadratic air drag, exponential mass taper (tip 40× lighter), so the loop accelerates like a real bullwhip |
-| 💥 **Real crack detection** | Only on deliberate fast moves or flicks: tip past the sound-barrier threshold, cord fully extended, hand moving fast. Tiny moves never crack |
+| 🪢 **Real whip physics** | Rigid-body handle on a wrist spring, a 36-node thong with **bending stiffness that fades toward the tip**, a clamped exit from the handle, exponential mass taper (tip 40× lighter), gravity, quadratic air drag, 480 Hz substeps. The loop rolls out and accelerates like a real bullwhip |
+| 💥 **Real crack detection** | Fires at the physical moment: the wave reaches the end, the whip is fully extended, the tip is past the sound-barrier threshold, and your hand actually swung. Then the tip recoils. Tiny moves never crack |
 | 🔥 **Fire Whip combo** | 5+ cracks inside 2 s sets the cord on fire |
+| 🎨 **Braided leather, 3 skins** | Plaited texture wrapped along the curve, knots, fall and frayed cracker, screen-space lighting, real motion blur. Cognac Leather · Obsidian · Ivory & Gold (`Alt+S`) |
 | ⚡ **VFX** | Shockwave rings, white-hot flash, spark showers, burn marks that fade over 3 s |
 | 🔊 **Procedural sound** | Whoosh that follows speed, a 5-layer crack (snap, hiss, resonant sweep, sub thump, room echo), soft chimes. No audio files needed |
 | 🖱️ **Click-through** | Keep working in your IDE while the whip follows your cursor |
@@ -37,11 +38,12 @@ Or pat it gently when it ships clean code. ✋
 
 <table>
 <tr>
-<td align="center"><img src="docs/fire.png" width="420"/><br/><b>💥 Flick → crack → combo</b></td>
-<td align="center"><img src="docs/dual.png" width="420"/><br/><b>🔥 Dual Whips on fire (5+ combo)</b></td>
+<td align="center"><img src="docs/crack.png" width="420"/><br/><b>💥 Flick → crack</b></td>
+<td align="center"><img src="docs/fire.png" width="420"/><br/><b>🔥 Fire Whip (5+ combo)</b></td>
 </tr>
 <tr>
-<td align="center" colspan="2"><img src="docs/pat.png" width="420"/><br/><b>✋ Pat Mode: عاش يا وحش</b></td>
+<td align="center"><img src="docs/dual.png" width="420"/><br/><b>⚔️ Dual Whips</b></td>
+<td align="center"><img src="docs/pat.png" width="420"/><br/><b>✋ Pat Mode: عاش يا وحش</b></td>
 </tr>
 </table>
 
@@ -76,6 +78,7 @@ npm run start:nogpu   # black background / GPU glitches
 | `Alt + 1` | Single whip |
 | `Alt + 2` | Dual whips |
 | `Alt + 3` | Pat mode ✋ |
+| `Alt + S` | Next skin |
 | `Alt + Q` | Quit |
 
 > 💡 Everything is also in the **tray menu**, in case your desktop blocks global shortcuts.
@@ -102,9 +105,10 @@ KORBAJ_SOUND_MODE=replace npm start
 ```
 main.js ──(cursor poll 120Hz, state)──► preload.js ──► renderer.js ──► Canvas 2D
    │                                                       │
-   ├─ transparent always-on-top window                     ├─ Verlet physics + crack detection
+   ├─ transparent always-on-top window                     ├─ physics.js   (whip simulation, crack detection)
    ├─ globalShortcut + Tray                                ├─ VFX: particles / rings / lashes / fire
-   └─ custom sound loader (IPC)                            └─ sound.js (Web Audio synth)
+   ├─ control socket (bin/korbaj.js)                       ├─ whip-draw.js (leather rendering, skins, blur)
+   └─ custom sound loader (IPC)                            └─ sound.js     (Web Audio synth)
 ```
 
 - **The cursor comes from the main process** (`screen.getCursorScreenPoint`), not from DOM events.
@@ -115,16 +119,24 @@ main.js ──(cursor poll 120Hz, state)──► preload.js ──► renderer.
 
 ## ⚙️ Tuning
 
-All tunables live in `CFG` at the top of `renderer.js`:
+Physics values live in `DEFAULTS` at the top of `physics.js`:
 
 | Key | Default | Effect |
 |---|---|---|
 | `intentSpeed` | `2300` | Minimum hand speed (px/s) for a crack. Lower = easier cracks |
-| `crackSpeedFactor` | `3.0` | Tip-speed threshold × screen height per second |
-| `wrist` | `0.012` | Lower = handle swings more freely |
-| `nodes` / `segLen` | `28` / `10.5` | Cord length and resolution |
-| `fireAt` | `5` | Combo needed for Fire Whip |
-| `tauntChance` | `0.4` | How often taunts pop up |
+| `crackSpeed` | `3300` | Tip speed (px/s at 1080p) that counts as breaking the sound barrier |
+| `bendRoot` | `0.5` | Stiffness of the thong at the handle. Lower = floppier whip |
+| `tipMassRatio` | `40` | How much lighter the tip is than the root. Higher = faster tip |
+| `wristFreq` | `15` | Wrist stiffness. Keep ≤ ~17 or flicks stop cracking |
+| `leadSpeed` | `480` | Lower = handle points along your motion sooner |
+| `cordNodes` / `segLen` | `36` / `9` | Whip length and resolution |
+
+After changing anything, run the physics regression test. It replays 11 kinds of mouse
+movement and checks that calm ones never crack and deliberate ones always do:
+
+```bash
+npm test
+```
 
 ## 🐧 Linux / Wayland (Hyprland, GNOME, KDE…)
 
@@ -154,6 +166,7 @@ Korbaj if it isn't running.
 node bin/korbaj.js toggle     # summon / hide (starts it if needed)
 node bin/korbaj.js passive    # click-through ↔ active
 node bin/korbaj.js mode 2     # 1 whip · 2 dual · 3 pat
+node bin/korbaj.js skin       # next skin (or: skin leather | obsidian | bone)
 node bin/korbaj.js status
 node bin/korbaj.js quit
 ```
@@ -182,7 +195,9 @@ Korbaj/
 ├── extras/hyprland.conf
 ├── preload.js       # secure IPC bridge
 ├── index.html       # canvas + HUD
-├── renderer.js      # physics, VFX, modes
+├── physics.js       # whip simulation (also runs in Node for tests)
+├── whip-draw.js     # braided-leather rendering, skins, motion blur
+├── renderer.js      # input, effects, modes, HUD
 ├── sound.js         # procedural Web Audio engine
 ├── assets/sounds/   # optional custom sounds
 └── docs/            # screenshots & demo

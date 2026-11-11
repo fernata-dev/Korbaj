@@ -1,18 +1,19 @@
 {
   "name": "korbaj",
   "productName": "Korbaj",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Korbaj (كرباج) — a physics-based whip overlay to motivate your AI. Response Accelerator.",
   "main": "main.js",
   "license": "MIT",
   "scripts": {
     "start": "electron . --ozone-platform=x11",
     "start:nogpu": "electron . --ozone-platform=x11 --disable-gpu",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check sound.js && node --check lib/hyprland.js && node --check lib/control.js && node --check bin/korbaj.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check physics.js && node --check whip-draw.js && node --check sound.js && node --check lib/hyprland.js && node --check lib/control.js && node --check bin/korbaj.js",
     "postinstall": "node scripts/ensure-electron.js",
     "fix-electron": "node scripts/ensure-electron.js --force",
     "start:wayland": "electron . --ozone-platform=wayland",
-    "ctl": "node bin/korbaj.js"
+    "ctl": "node bin/korbaj.js",
+    "test": "node scripts/physics-test.js"
   },
   "devDependencies": {
     "electron": "45.2.3"

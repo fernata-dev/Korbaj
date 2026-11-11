@@ -37,7 +37,16 @@ const POLL_MS = 8;
 const SOUND_DIR = path.join(__dirname, 'assets', 'sounds');
 const startMode = Number((argv.find((a) => a.startsWith('--mode=')) || '').split('=')[1]) || 1;
 
-const state = { visible: true, passive: true, mode: [1, 2, 3].includes(startMode) ? startMode : 1 };
+const SKINS = ['leather', 'obsidian', 'bone'];
+const SKIN_LABELS = { leather: 'Cognac Leather', obsidian: 'Obsidian', bone: 'Ivory & Gold' };
+const startSkin = (argv.find((a) => a.startsWith('--skin=')) || '').split('=')[1] || process.env.KORBAJ_SKIN;
+
+const state = {
+  visible: true,
+  passive: true,
+  mode: [1, 2, 3].includes(startMode) ? startMode : 1,
+  skin: SKINS.includes(startSkin) ? startSkin : 'leather',
+};
 
 let win = null;
 let tray = null;
@@ -222,6 +231,12 @@ function setMode(m) {
   pushState();
 }
 
+function setSkin(name) {
+  state.skin = SKINS.includes(name) ? name : SKINS[(SKINS.indexOf(state.skin) + 1) % SKINS.length];
+  if (!state.visible) setVisible(true);
+  pushState();
+}
+
 const quit = () => app.quit();
 
 function handleCommand(parts) {
@@ -237,6 +252,10 @@ function handleCommand(parts) {
       setMode(m);
       return `mode ${m}`;
     }
+    case 'skin':
+      if (arg && arg !== 'next' && !SKINS.includes(arg)) return `error skin must be one of: ${SKINS.join(', ')}`;
+      setSkin(arg === 'next' ? undefined : arg);
+      return `skin ${state.skin}`;
     case 'quit': setTimeout(quit, 50); return 'bye';
     case 'status': return JSON.stringify({ ...state, cursorSource, session: SESSION || process.platform, desktop: DESKTOP });
     default: return `error unknown command: ${cmd}`;
@@ -250,6 +269,7 @@ const SHORTCUTS = {
   'Alt+1': () => setMode(1),
   'Alt+2': () => setMode(2),
   'Alt+3': () => setMode(3),
+  'Alt+S': () => setSkin(),
   'Alt+Q': quit,
 };
 
@@ -298,6 +318,11 @@ function rebuildTrayMenu() {
     { label: 'Single Whip (Alt+1)', type: 'radio', checked: state.mode === 1, click: () => setMode(1) },
     { label: 'Dual Whips (Alt+2)', type: 'radio', checked: state.mode === 2, click: () => setMode(2) },
     { label: 'Pat Mode (Alt+3)', type: 'radio', checked: state.mode === 3, click: () => setMode(3) },
+    { type: 'separator' },
+    {
+      label: 'Skin (Alt+S)',
+      submenu: SKINS.map((k) => ({ label: SKIN_LABELS[k], type: 'radio', checked: state.skin === k, click: () => setSkin(k) })),
+    },
     { type: 'separator' },
     { label: 'Quit (Alt+Q)', click: quit },
   ]));

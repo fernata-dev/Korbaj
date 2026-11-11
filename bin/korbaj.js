@@ -7,6 +7,7 @@
  *   korbaj show | hide
  *   korbaj passive      toggle click-through
  *   korbaj mode 1|2|3   whip / dual / pat
+ *   korbaj skin [leather|obsidian|bone]   (no name = next skin)
  *   korbaj quit
  *   korbaj status
  */
