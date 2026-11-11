@@ -150,15 +150,28 @@ keys. Korbaj works around both:
 | Window gets tiled / steals the screen | On Hyprland it makes itself floating, pinned to all workspaces, and borderless, then gives focus back |
 | Global shortcuts blocked | Bind `bin/korbaj.js` in your compositor. It talks to the running app over a local socket |
 
-### Hyprland setup (one line)
+### Hyprland setup (one command)
 
-```ini
-# ~/.config/hypr/hyprland.conf
-source = ~/Korbaj/extras/hyprland.conf
+```bash
+npm run setup
 ```
 
-That gives you `Alt+W / Alt+C / Alt+1-3 / Alt+Shift+Q` system-wide. `Alt+W` also **starts**
+It writes `~/.config/hypr/korbaj.conf`, sources it from `hyprland.conf` (exactly once, with a
+backup), reloads Hyprland and verifies the shortcuts are registered. The binds use **physical key
+codes**, so they work whatever keyboard layout is active (with an Arabic layout the `W` key is `ص`),
+and absolute paths, so Hyprland doesn't need `node` on its `PATH`.
+
+You get `Alt+W / Alt+C / Alt+1-3 / Alt+S / Alt+Shift+Q` system-wide. `Alt+W` also **starts**
 Korbaj if it isn't running.
+
+Something not working?
+
+```bash
+npm run doctor
+```
+
+It checks every link (Electron, the running app, Hyprland, the config, the registered binds)
+and tells you which one is broken.
 
 ### Control from anywhere (any OS, any hotkey tool)
 
@@ -167,6 +180,7 @@ node bin/korbaj.js toggle     # summon / hide (starts it if needed)
 node bin/korbaj.js passive    # click-through ↔ active
 node bin/korbaj.js mode 2     # 1 whip · 2 dual · 3 pat
 node bin/korbaj.js skin       # next skin (or: skin leather | obsidian | bone)
+node bin/korbaj.js restart    # quit + start again (after updating)
 node bin/korbaj.js status
 node bin/korbaj.js quit
 ```
@@ -191,6 +205,7 @@ Korbaj/
 ├── main.js          # window, shortcuts, tray, cursor polling, monitor follow
 ├── lib/hyprland.js  # Hyprland IPC: global cursor + overlay window setup
 ├── lib/control.js   # local control socket
+├── lib/setup.js     # `korbaj setup` / `korbaj doctor`
 ├── bin/korbaj.js    # CLI: toggle / passive / mode / quit
 ├── extras/hyprland.conf
 ├── preload.js       # secure IPC bridge
